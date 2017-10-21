@@ -17,45 +17,57 @@ package main
 import (
 	"encoding/json"
 
-	pkgPod "github.com/rkt/rkt/pkg/pod"
+	"github.com/rkt/rkt/pkg/pod"
+	"github.com/rkt/rkt/rkt/flag"
 	"github.com/spf13/cobra"
 )
 
-var (
-	cmdCatManifest = &cobra.Command{
+type catManifestOptions struct {
+	podFilename string
+	prettyPrint bool
+
+	pods []string
+}
+
+func NewCatManifestCommand() *cobra.Command {
+	var (
+		opts catManifestOptions
+		err  error
+	)
+
+	cmdCatManifest := cobra.Command{
 		Use:   "cat-manifest --uuid-file=FILE | UUID ...",
 		Short: "Inspect and print the pod manifest",
 		Long:  `UUID should be the UUID of a pod`,
-		Run:   runWrapper(runCatManifest),
+		Run: runWrapper(func(cmd *cobra.Command, args []string) int {
+			opts.pods, err = flag.Pods(opts.podFilename, args)
+			if err != nil {
+				stderr.Print(err.Error())
+				cmd.Usage()
+				return 254
+			}
+			return runCatManifest(cmd, &opts)
+		}),
 	}
-	flagPMPrettyPrint bool
-)
 
-func init() {
-	cmdRkt.AddCommand(cmdCatManifest)
-	cmdCatManifest.Flags().BoolVar(&flagPMPrettyPrint, "pretty-print", true, "apply indent to format the output")
-	cmdCatManifest.Flags().StringVar(&flagUUIDFile, "uuid-file", "", "read pod UUID from file instead of argument")
+	flags := cmdCatManifest.Flags()
+	flags.BoolVar(&opts.prettyPrint, "pretty-print", true, "apply indent to format the output")
+	flags.StringVar(&opts.podFilename, "uuid-file", "", "read pod UUID from file instead of argument")
+
+	return &cmdCatManifest
 }
 
-func runCatManifest(cmd *cobra.Command, args []string) (exit int) {
-	var podUUID string
+func init() {
+	cmdRkt.AddCommand(NewCatManifestCommand())
+}
 
-	if flagUUIDFile != "" {
-		uuid, err := pkgPod.ReadUUIDFromFile(flagUUIDFile)
-		if err != nil {
-			stderr.PrintE("unable to resolve UUID from file", err)
-			return 254
-		}
-		podUUID = uuid
-	} else {
-		if len(args) != 1 {
-			cmd.Usage()
-			return 254
-		}
-		podUUID = args[0]
+func runCatManifest(cmd *cobra.Command, opts *catManifestOptions) int {
+	if len(opts.pods) > 1 {
+		stderr.Printf("maximum one UUID is expected, got %d", len(opts.pods))
+		return 254
 	}
 
-	pod, err := pkgPod.PodFromUUIDString(getDataDir(), podUUID)
+	pod, err := pod.PodFromUUIDString(getDataDir(), opts.pods[0])
 	if err != nil {
 		stderr.PrintE("problem retrieving pod", err)
 		return 254
@@ -69,7 +81,7 @@ func runCatManifest(cmd *cobra.Command, args []string) (exit int) {
 	}
 
 	var b []byte
-	if flagPMPrettyPrint {
+	if opts.prettyPrint {
 		b, err = json.MarshalIndent(manifest, "", "\t")
 	} else {
 		b, err = json.Marshal(manifest)

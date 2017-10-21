@@ -19,76 +19,70 @@ package main
 import (
 	"fmt"
 
-	"github.com/rkt/rkt/stage0"
-
-	pkgPod "github.com/rkt/rkt/pkg/pod"
+	"github.com/hashicorp/errwrap"
 	"github.com/spf13/cobra"
+
+	"github.com/rkt/rkt/pkg/pod"
+	"github.com/rkt/rkt/rkt/flag"
+	"github.com/rkt/rkt/stage0"
 )
 
-var (
-	cmdStop = &cobra.Command{
-		Use:   "stop --uuid-file=FILE | UUID ...",
-		Short: "Stop a pod",
-		Run:   runWrapper(runStop),
-	}
-	flagForce bool
-)
+type stopOptions struct {
+	force       bool
+	podFilename string
 
-func init() {
-	cmdRkt.AddCommand(cmdStop)
-	cmdStop.Flags().BoolVar(&flagForce, "force", false, "forced stopping")
-	cmdStop.Flags().StringVar(&flagUUIDFile, "uuid-file", "", "read pod UUID from file instead of argument")
+	// A list of the POD UUIDs.
+	pods []string
 }
 
-func runStop(cmd *cobra.Command, args []string) (exit int) {
-	var podUUIDs []string
-	var errors int
+// NewStopCommand creates a new stop sub-command.
+func NewStopCommand() *cobra.Command {
+	var (
+		opts stopOptions
+		err  error
+	)
 
-	ret := 0
-	switch {
-	case len(args) == 0 && flagUUIDFile != "":
-		podUUID, err := pkgPod.ReadUUIDFromFile(flagUUIDFile)
-		if err != nil {
-			stderr.PrintE("unable to resolve UUID from file", err)
-			ret = 1
-		} else {
-			podUUIDs = append(podUUIDs, podUUID)
-		}
-
-	case len(args) > 0 && flagUUIDFile == "":
-		podUUIDs = args
-
-	default:
-		cmd.Usage()
-		return 254
+	cmdStop := cobra.Command{
+		Use:          "stop --uuid-file=FILE | UUID [UUIDS...]",
+		Short:        "Stop a pod",
+		SilenceUsage: true,
+		Run: runWrapper(func(cmd *cobra.Command, args []string) int {
+			opts.pods, err = flag.Pods(opts.podFilename, args)
+			if err != nil {
+				stderr.Print(err.Error())
+				cmd.Usage()
+				return 254
+			}
+			return runStop(cmd, &opts)
+		}),
 	}
 
-	for _, podUUID := range podUUIDs {
-		p, err := pkgPod.PodFromUUIDString(getDataDir(), podUUID)
+	flags := cmdStop.Flags()
+	flags.BoolVar(&opts.force, "force", false, "force stopping")
+	flags.StringVar(&opts.podFilename, "uuid-file", "", "read pod UUID from file instead of argument")
+
+	return &cmdStop
+}
+
+func init() {
+	cmdRkt.AddCommand(NewStopCommand())
+}
+
+func runStop(cmd *cobra.Command, opts *stopOptions) int {
+	var (
+		errors  = 0
+		dataDir = getDataDir()
+	)
+
+	for _, podUUID := range opts.pods {
+		err := stopPod(dataDir, podUUID, opts.force)
 		if err != nil {
 			errors++
-			stderr.PrintE("cannot get pod", err)
-			continue
-		}
-		defer p.Close()
-
-		if p.IsAfterRun() {
-			stdout.Printf("pod %q is already stopped", p.UUID)
+			stderr.PrintE(fmt.Sprintf("error stopping %q", podUUID), err)
 			continue
 		}
 
-		if p.State() != pkgPod.Running {
-			stderr.Error(fmt.Errorf("pod %q is not running", p.UUID))
-			errors++
-			continue
-		}
-
-		if err := stage0.StopPod(p.Path(), flagForce, p.UUID); err == nil {
-			stdout.Printf("%q", p.UUID)
-		} else {
-			stderr.PrintE(fmt.Sprintf("error stopping %q", p.UUID), err)
-			errors++
-		}
+		stdout.Printf("%q", podUUID)
 	}
 
 	if errors > 0 {
@@ -96,5 +90,28 @@ func runStop(cmd *cobra.Command, args []string) (exit int) {
 		return 254
 	}
 
-	return ret
+	return 0
+}
+
+func stopPod(dataDir, uuid string, force bool) error {
+	p, err := pod.PodFromUUIDString(dataDir, uuid)
+	if err != nil {
+		return errwrap.Wrap(fmt.Errorf("cannot get pod"), err)
+	}
+
+	defer p.Close()
+	if p.IsAfterRun() {
+		return fmt.Errorf("pod %q is already stopped", p.UUID)
+	}
+
+	if p.State() != pod.Running {
+		return fmt.Errorf("pod %q is not running", p.UUID)
+	}
+
+	err = stage0.StopPod(p.Path(), force, p.UUID)
+	if err != nil {
+		return errwrap.Wrap(fmt.Errorf("error stopping %q", p.UUID), err)
+	}
+
+	return nil
 }
