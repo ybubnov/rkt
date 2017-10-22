@@ -19,49 +19,52 @@ package main
 import (
 	"os"
 
-	pkgPod "github.com/rkt/rkt/pkg/pod"
+	"github.com/rkt/rkt/pkg/pod"
+	"github.com/rkt/rkt/rkt/flag"
 	"github.com/spf13/cobra"
 )
 
-var (
-	cmdRm = &cobra.Command{
+type rmOptions struct {
+	podFilename string
+
+	pods []string
+}
+
+func NewRmCommand() *cobra.Command {
+	var (
+		opts rmOptions
+		err  error
+	)
+
+	cmdRm := cobra.Command{
 		Use:   "rm --uuid-file=FILE | UUID ...",
 		Short: "Remove all files and resources associated with an exited pod",
 		Long:  `Unlike gc, rm allows users to remove specific pods.`,
-		Run:   ensureSuperuser(runWrapper(runRm)),
+		Run: ensureSuperuser(runWrapper(func(cmd *cobra.Command, args []string) int {
+			opts.pods, err = flag.Pods(opts.podFilename, args)
+			if err != nil {
+				stderr.Print(err.Error())
+				return 254
+			}
+			return runRm(cmd, &opts)
+		})),
 	}
-	flagUUIDFile string
-)
 
-func init() {
-	cmdRkt.AddCommand(cmdRm)
-	cmdRm.Flags().StringVar(&flagUUIDFile, "uuid-file", "", "read pod UUID from file instead of argument")
+	flags := cmdRm.Flags()
+	flags.StringVar(&opts.podFilename, "uuid-file", "", "read pod UUID from file instead of argument")
+
+	return &cmdRm
 }
 
-func runRm(cmd *cobra.Command, args []string) (exit int) {
-	var podUUIDs []string
+func init() {
+	cmdRkt.AddCommand(NewRmCommand())
+}
+
+func runRm(cmd *cobra.Command, opts *rmOptions) (exit int) {
 	var ret int
 
-	switch {
-	case len(args) == 0 && flagUUIDFile != "":
-		podUUID, err := pkgPod.ReadUUIDFromFile(flagUUIDFile)
-		if err != nil {
-			stderr.PrintE("unable to resolve UUID from file", err)
-			ret = 254
-		} else {
-			podUUIDs = append(podUUIDs, podUUID)
-		}
-
-	case len(args) > 0 && flagUUIDFile == "":
-		podUUIDs = args
-
-	default:
-		cmd.Usage()
-		return 254
-	}
-
-	for _, podUUID := range podUUIDs {
-		p, err := pkgPod.PodFromUUIDString(getDataDir(), podUUID)
+	for _, podUUID := range opts.pods {
+		p, err := pod.PodFromUUIDString(getDataDir(), podUUID)
 		if err != nil {
 			ret = 254
 			stderr.PrintE("cannot get pod", err)
@@ -83,28 +86,28 @@ func runRm(cmd *cobra.Command, args []string) (exit int) {
 	return ret
 }
 
-func removePod(p *pkgPod.Pod) bool {
+func removePod(p *pod.Pod) bool {
 	switch p.State() {
-	case pkgPod.Running:
+	case pod.Running:
 		stderr.Printf("pod %q is currently running", p.UUID)
 		return false
 
-	case pkgPod.Embryo, pkgPod.Preparing:
+	case pod.Embryo, pod.Preparing:
 		stderr.Printf("pod %q is currently being prepared", p.UUID)
 		return false
 
-	case pkgPod.Deleting:
+	case pod.Deleting:
 		stderr.Printf("pod %q is currently being deleted", p.UUID)
 		return false
 
-	case pkgPod.AbortedPrepare:
+	case pod.AbortedPrepare:
 		stderr.Printf("moving failed prepare %q to garbage", p.UUID)
 		if err := p.ToGarbage(); err != nil && err != os.ErrNotExist {
 			stderr.PrintE("rename error", err)
 			return false
 		}
 
-	case pkgPod.Prepared:
+	case pod.Prepared:
 		stderr.Printf("moving expired prepared pod %q to garbage", p.UUID)
 		if err := p.ToGarbage(); err != nil && err != os.ErrNotExist {
 			stderr.PrintE("rename error", err)
@@ -113,9 +116,9 @@ func removePod(p *pkgPod.Pod) bool {
 
 	// p.isExitedGarbage and p.isExited can be true at the same time. Test
 	// the most specific case first.
-	case pkgPod.ExitedGarbage, pkgPod.Garbage:
+	case pod.ExitedGarbage, pod.Garbage:
 
-	case pkgPod.Exited:
+	case pod.Exited:
 		if err := p.ToExitedGarbage(); err != nil && err != os.ErrNotExist {
 			stderr.PrintE("rename error", err)
 			return false

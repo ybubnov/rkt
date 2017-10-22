@@ -23,8 +23,10 @@ var (
 		Use:   "exec [--app=APP_NAME] UUID [CMD [ARGS ...]]",
 		Short: "Execute commands in the given app's namespace.",
 		Long:  "This executes the commands in the given app's namespace. The UUID is the UUID of a running pod. the app name is specified by --app. If CMD and ARGS are empty, then it will execute '/bin/bash' by default.",
-		Run:   ensureSuperuser(runWrapper(runEnter)),
+		//Run:   ensureSuperuser(runWrapper(runEnter)),
 	}
+
+	flagAppName string
 )
 
 func init() {

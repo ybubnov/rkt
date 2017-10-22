@@ -22,56 +22,83 @@ import (
 
 	"github.com/appc/spec/schema/types"
 	"github.com/hashicorp/errwrap"
-	pkgPod "github.com/rkt/rkt/pkg/pod"
+	"github.com/rkt/rkt/pkg/pod"
+	"github.com/rkt/rkt/rkt/flag"
 	"github.com/rkt/rkt/stage0"
 	"github.com/rkt/rkt/store/imagestore"
 	"github.com/rkt/rkt/store/treestore"
 	"github.com/spf13/cobra"
 )
 
-var (
-	cmdEnter = &cobra.Command{
-		Use:   "enter [--app=APPNAME] UUID [CMD [ARGS ...]]",
+const (
+	defaultCmd = "/bin/bash"
+)
+
+type enterOptions struct {
+	appName     string
+	podFilename string
+
+	pods []string
+	args []string
+}
+
+func NewEnterCommand() *cobra.Command {
+	var (
+		opts enterOptions
+		err  error
+	)
+
+	cmdEnter := cobra.Command{
+		Use:   "enter [--app=APPNAME] --uuid-file=FILE | UUID [CMD [ARGS ...]]",
 		Short: "Enter the namespaces of an app within a rkt pod",
 
 		Long: `UUID should be the UUID of a running pod.
 
 By default the CMD that is run is /bin/bash, providing the user with shell
 access to the running pod.`,
-		Run: ensureSuperuser(runWrapper(runEnter)),
+		Run: ensureSuperuser(runWrapper(func(cmd *cobra.Command, args []string) int {
+			opts.pods, err = flag.Pods(opts.podFilename, args)
+			if err != nil {
+				stderr.Print(err.Error())
+				cmd.Usage()
+				return 254
+			}
+
+			// When the POD filename is empty, the first argument is
+			// treated as a POD UUID, and the rest as command to execute.
+			if opts.podFilename == "" {
+				opts.pods, opts.args = opts.pods[:0], opts.pods[1:]
+			}
+			return runEnter(cmd, &opts)
+		})),
 	}
-	flagAppName string
-)
 
-const (
-	defaultCmd = "/bin/bash"
-)
-
-func init() {
-	cmdRkt.AddCommand(cmdEnter)
-	cmdEnter.Flags().StringVar(&flagAppName, "app", "", "name of the app to enter within the specified pod")
+	flags := cmdEnter.Flags()
+	flags.StringVar(&opts.appName, "app", "", "name of the app to enter within the specified pod")
+	flags.StringVar(&opts.podFilename, "uuid-file", "", "read pod UUID from file instead of argument")
 
 	// Disable interspersed flags to stop parsing after the first non flag
 	// argument. This is need to permit to correctly handle
 	// multiple "IMAGE -- imageargs ---"  options
-	cmdEnter.Flags().SetInterspersed(false)
+	flags.SetInterspersed(false)
+
+	return &cmdEnter
 }
 
-func runEnter(cmd *cobra.Command, args []string) (exit int) {
-	if len(args) < 1 {
-		cmd.Usage()
-		return 254
-	}
+func init() {
+	cmdRkt.AddCommand(NewEnterCommand())
+}
 
-	p, err := pkgPod.PodFromUUIDString(getDataDir(), args[0])
+func runEnter(cmd *cobra.Command, opts *enterOptions) int {
+	p, err := pod.PodFromUUIDString(getDataDir(), opts.pods[0])
 	if err != nil {
 		stderr.PrintE("problem retrieving pod", err)
 		return 254
 	}
 	defer p.Close()
 
-	if p.State() != pkgPod.Running {
-		stderr.Printf("pod %q isn't currently running", p.UUID)
+	if p.State() != pod.Running {
+		stderr.Printf("pod %q is not currently running", p.UUID)
 		return 254
 	}
 
@@ -81,13 +108,13 @@ func runEnter(cmd *cobra.Command, args []string) (exit int) {
 		return 254
 	}
 
-	appName, err := getAppName(p)
+	appName, err := getAppName(p, opts.appName)
 	if err != nil {
 		stderr.PrintE("unable to determine app name", err)
 		return 254
 	}
 
-	argv, err := getEnterArgv(p, args)
+	argv, err := getEnterArgv(p, opts.args)
 	if err != nil {
 		stderr.PrintE("enter failed", err)
 		return 254
@@ -125,9 +152,9 @@ func runEnter(cmd *cobra.Command, args []string) (exit int) {
 // If one was supplied in the flags then it's simply returned
 // If the PM contains a single app, that app's name is returned
 // If the PM has multiple apps, the names are printed and an error is returned
-func getAppName(p *pkgPod.Pod) (*types.ACName, error) {
-	if flagAppName != "" {
-		return types.NewACName(flagAppName)
+func getAppName(p *pod.Pod, appName string) (*types.ACName, error) {
+	if appName != "" {
+		return types.NewACName(appName)
 	}
 
 	// figure out the app name, or show a list if multiple are present
@@ -153,7 +180,7 @@ func getAppName(p *pkgPod.Pod) (*types.ACName, error) {
 }
 
 // getEnterArgv returns the argv to use for entering the pod
-func getEnterArgv(p *pkgPod.Pod, cmdArgs []string) ([]string, error) {
+func getEnterArgv(p *pod.Pod, cmdArgs []string) ([]string, error) {
 	var argv []string
 	if len(cmdArgs) < 2 {
 		stderr.Printf("no command specified, assuming %q", defaultCmd)

@@ -70,7 +70,7 @@ func runAttach(cmd *cobra.Command, args []string) (exit int) {
 		return 254
 	}
 
-	appName, err := getAppName(p)
+	appName, err := getAppName(p, flagAppName)
 	if err != nil {
 		stderr.PrintE("unable to determine app name", err)
 		return 254
